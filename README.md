@@ -4,6 +4,14 @@
 
 https://ssr.vuejs.org/zh/
 
+## webpack4+koa 实现 ssr
+
+https://www.mk2048.com/blog/blog_cj1hc00kj.html
+
+vue-server-renderer 的作用是拿到 vue 实例并渲染成 html 结构，但它不仅仅只做着一件事，后面会介绍其他配置参数和配合 webpack 进行构建。
+
+服务器端渲染的基本原理了，其实说白了，无服务器端渲染时，前端打包后的 html 只是包含 head 部分，body 部分都是通过动态插入到 id 为#app 的 dom 中，而服务器端渲染(SSR)就是服务器来提前编译 Vue 生成 HTML 返回给 web 浏览器，这样网络爬虫爬取的内容就是网站上所有可呈现的内容。
+
 ## 1 基本用法
 
 demo1.js： 渲染一个 Vue 实例
