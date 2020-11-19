@@ -12,6 +12,388 @@ vue-server-renderer 的作用是拿到 vue 实例并渲染成 html 结构，但�
 
 服务器端渲染的基本原理了，其实说白了，无服务器端渲染时，前端打包后的 html 只是包含 head 部分，body 部分都是通过动态插入到 id 为#app 的 dom 中，而服务器端渲染(SSR)就是服务器来提前编译 Vue 生成 HTML 返回给 web 浏览器，这样网络爬虫爬取的内容就是网站上所有可呈现的内容。
 
+### 正式环境构建
+
+> Node.js 服务器是一个长期运行的进程、当我们的代码进入该进程时，它将进行一次取值并留存在内存中。这意味着如果创建一个单例对象，它将在每个传入的请求之间共享，所以我们需要**为每个请求创建一个新的根 Vue 实例**
+
+不仅 vue 实例，接下来要用到的 vuex、vue-router 也是如此。我们利用 webpack 需要分别对客户端代码和服务器端代码分别打包， 服务器需要「服务器 bundle」然后用于服务器端渲染(SSR)，而「客户端 bundle」会发送给浏览器，用于混合静态标记。
+
+我们可以大致的理解为服务器端、客户端通过俩个入口`Server entry`、 `Clinet entry` 获取源代码，再通过 webpack 打包变成俩个 bundle
+`vue-ssr-server-bundle.json`和`vue-ssr-client-manifest.json`，配合生成完成 HTML，而 app.js 是俩个入口通用的代码部分，其作用是暴露出 vue 实例。
+
+`entry-server.js`，它是暴露出一个函数，接受渲染上下文 context 参数，然后根据 url 匹配组件。所以说参数需要在我们调用`renderToString`传入 context，并包括 url 属性。
+
+生成的俩个 bundle 其实是作为参数传入到`createBundleRenderer()`函数中，然后在 renderToString 变成 html 结构，与`createRenderer`不同的是前者是通过 bundle 参数获取 vue 组件编译，后者是需要在 renderToString 时传入 vue 实例。我们先编写 webpack 成功生成 bundle 后，再去编写 server.js，这样有利于我们更好的理解和测试。
+
+`webpack.client.conf.js`:主要是对客户端代码进行打包，它是通过 webpack-merge 实现对基础配置的合并，其中要实现对 css 样式的处理，此处我用了 stylus，同时要下载对应的 stylus-loader 来处理。在这里我们先不考虑开发环境，后面会针对开发环境对 webpack 进行修改。
+
+我们现在可以通过 `npm run build:client` 执行打包命令，执行命令之前要把依赖的 npm 包下载好。当打包命令执行完毕后，我们会发现多了一个 dist 文件夹，其中除了静态文件以外，生成了用于服务端渲染的 JSON 文件：`vue-ssr-client-manifest.json`。
+
+同理，我们需要编写服务端 webpack 配置`webpack.server.conf.js`，同样打包生成 vue-ssr-server-bundle.json。
+
+### 开发环境构建
+
+我们跑通了基本的服务端渲染流程，但还没有涉及到异步数据、缓存等问题。在此之前，我们需要先实现开发环境的搭建，因为我们不可能敲的每一行代码都需要重新打包并起服务。这是不利于调试的。
+
+想一想 vue-cli 构建出来的项目，我们可以通过 npm run dev(vue-cli3 使用了 npm run serve)起一个服务，然后更改文件的时候，页面也会自动的热加载，不需要手动刷新。
+
+我们也要实现一个类似的开发环境，所以我们需要利用 node 来构建 webpack 配置，并且实时监控文件的改变，当改变时应该重新进行打包，重新生成俩个 JSON 文件，并重新进行`BundleRenderer.renderToString()`
+
+我们除了重新生成 JSON 文件以外，其他逻辑和之前实现的逻辑大体相同。所以我们可以在 server.js 基础上进行修改，在原基础上进行环境的判断，做不同的 render。我们需要一个环境变量来决定执行哪个逻辑。
+
+这里我们使用 cross-env 来设置 process.env.NODE_ENV 变量，我们把 build、start 命令都设置了 process.env.NODE_ENV 为 production 生产环境，这样我们在文件中可以获取到该值，如果没有我们就默认是 development 开发环境。
+
+1. 首先是生成 `BundleRenderer` 实例，之前我们是通过固定路径（打包后的 dist 文件夹下）获取 JSON 文件
+
+```
+// 之前代码逻辑
+const serverBundle = require('./dist/vue-ssr-server-bundle.json')
+const clientManifest = require('./dist/vue-ssr-client-manifest.json')
+const template = require('fs').readFileSync('./index.template.html', 'utf-8')
+
+//...忽略无关代码
+
+const renderer = createBundleRenderer(serverBundle, {
+  runInNewContext: false,
+  template, // 页面模板
+  clientManifest // 客户端构建 manifest
+})
+```
+
+我们需要按照环境变量更改逻辑，如果是生产环境上述代码不变，如果是开发环境，我们需要有一个函数来动态的获取打包的 JSON 文件并且重新生成 `BundleRenderer` 实例。
+
+我们先定义好这个函数为 `setupDevServer`，顾名思义这个函数是构建开发环境的，它的作用是 nodeAPI 构建 webpack 配置，并且做到监听文件。我们 server.js 中可以通过传递个回调函数来做重新生成 `BundleRenderer` 实例的操作。而接受的参数就是俩个新生成的 JSON 文件。
+
+```
+// 假设已经实现
+const setupDevServer = require('./build/setup-dev-server')
+// 生成实例公共函数，开发、生产环境只是传入参数不同
+const createBundle = (bundle, clientManifest) => {
+  return createBundleRenderer(bundle, {
+    runInNewContext: false,
+    template,
+    clientManifest
+  })
+}
+let renderer // 将实例变量提到全局变量，根据环境变量赋值
+const template = require('fs').readFileSync('./index.template.html', 'utf-8') // 模板
+
+// 第 2步：根据环境变量生成不同BundleRenderer实例
+if (process.env.NODE_ENV === 'production') {
+  // 获取客户端、服务器端打包生成的json文件
+  const serverBundle = require('./dist/vue-ssr-server-bundle.json')
+  const clientManifest = require('./dist/vue-ssr-client-manifest.json')
+  // 赋值
+  renderer = createBundle(serverBundle, clientManifest)
+  // 静态资源，开发环境不需要指定
+  router.get('/static/*', async (ctx, next) => {
+    console.log('进来')
+    await send(ctx, ctx.path, { root: __dirname + '/dist' });
+  })
+} else {
+  // 假设setupDevServer已经实现，并传入的回调函数会接受生成的json文件
+  setupDevServer(app, (bundle, clientManifest) => {
+    // 赋值
+    renderer = createBundle(bundle, clientManifest)
+  })
+}
+```
+
+在之前，我们实现的 webpack 配置并没有对生产环境与开发环境做区别，但其实，我们应该像 vue-cli 一样针对环境来做不同的优化，比如开发环境 devtool 我们可以使用`cheap-module-eval-source-map`,
+编译会更快，css 样式没有必要打包单独文件，使用 vue-style-loader 做处理就好，并且因为开发环境需要模块热重载，所以不提取文件是必要的。开发环境可以做更友好的错误提示。还有就是生产环境需要做更多的打包优化，比如压缩，缓存之类。
+
+修改`webpack.base.conf.js`：
+
+```
+// ...
+// 定义是否是生产环境的标志位，用于配置中
+const isProd = process.env.NODE_ENV === 'production'
+
+module.exports = {
+  // 这里使用对象的格式，因为在setDevServer.js中需要添加一个热重载的入口
+  entry: {
+    app: resolve('src/entry-client.js')
+  },
+  // 开发环境启动sourcemap可以更好地定位错误位置
+  devtool: isProd
+    ? false
+    : 'cheap-module-eval-source-map',
+  // ...... 省略
+}
+```
+
+修改`webpack.client.conf.js`：
+
+```
+// 定义是否是生产环境的标志位，用于配置中
+const isProd = process.env.NODE_ENV === 'production'
+
+const pordWebpackConfig = merge(baseWebpackConfig, {
+  mode: process.env.NODE_ENV || 'development',
+  output: {
+    // chunkhash是根据内容生成的hash, 易于缓存。
+    // 开发环境不需要生hash、这个我们在setDevServer函数里面改
+    filename: 'static/js/[name].[chunkhash].js',
+    chunkFilename: 'static/js/[id].[chunkhash].js'
+  },
+  module: {
+    rules: [
+      {
+        test: /\.styl(us)?$/,
+        // 开发环境不需要提取css单独文件
+        use: isProd
+          ? [MiniCssExtractPlugin.loader, 'css-loader', 'stylus-loader']
+          : ['vue-style-loader', 'css-loader', 'stylus-loader']
+      },
+    ]
+  },
+  // ... 省略
+}
+```
+
+关于服务器端 webpack 的配置可以不进行修改，因为它的功能最后只打包出一个 JSON 文件，并不需要针对环境做一些改变。
+
+编写`set-dev-server.js`，setDevServer 函数主要是利用 webpack 手动构建应用，并实现热加载。
+
+首先我们需要俩个中间件`koa-webpack-dev-middleware`和`koa-webpack-hot-middleware`。前者是通过传入 webpack 编译好的 compiler 实现热加载，而后者是实现模块热更替，热加载是监听文件变化，从而进行刷新网页，模块热更替则在它的基础上做到不需要刷新页面。
+
+我们客户端 webpack 配置可以通过前面说的实现自动更新，而服务端 compiler，我们通过 watchAPI，进行监听。当俩者其中有一个变化时，我们就需要调用传入的回调，将新生成的 JSON 文件传入。整个流程大致就是这样，具体代码如下：
+
+```
+const fs = require('fs')
+const path = require('path')
+// memory-fs可以使webpack将文件写入到内存中，而不是写入到磁盘。
+const MFS = require('memory-fs')
+const webpack = require('webpack')
+const clientConfig = require('./webpack.client.conf')
+const serverConfig = require('./webpack.server.conf')
+// webpack热加载需要
+const webpackDevMiddleware = require('koa-webpack-dev-middleware')
+// 配合热加载实现模块热替换
+const webpackHotMiddleware = require('koa-webpack-hot-middleware')
+
+// 读取vue-ssr-webpack-plugin生成的文件
+const readFile = (fs, file) => {
+  try {
+    return fs.readFileSync(path.join(clientConfig.output.path, file), 'utf-8')
+  } catch (e) {
+    console.log('读取文件错误：', e)
+  }
+}
+
+module.exports = function setupDevServer(app, cb) {
+  let bundle
+  let clientManifest
+
+  // 监听改变后更新函数
+  const update = () => {
+    if (bundle && clientManifest) {
+      cb(bundle, clientManifest)
+    }
+  }
+
+  // 修改webpack配合模块热替换使用
+  clientConfig.entry.app = ['webpack-hot-middleware/client', clientConfig.entry.app]
+  clientConfig.output.filename = '[name].js'
+  clientConfig.plugins.push(
+    new webpack.HotModuleReplacementPlugin(),
+    new webpack.NoEmitOnErrorsPlugin()
+  )
+
+
+  // 编译clinetWebpack 插入Koa中间件
+  const clientshh = webpack(clientConfig)
+  const devMiddleware = webpackDevMiddleware(clientCompiler, {
+    publicPath: clientConfig.output.publicPath,
+    noInfo: true
+  })
+  app.use(devMiddleware)
+
+  clientCompiler.plugin('done', stats => {
+    stats = stats.toJson()
+    stats.errors.forEach(err => console.error(err))
+    stats.warnings.forEach(err => console.warn(err))
+    if (stats.errors.length) return
+    clientManifest = JSON.parse(readFile(
+      devMiddleware.fileSystem,
+      'vue-ssr-client-manifest.json'
+    ))
+    update()
+  })
+
+  // 插入Koa中间件(模块热替换)
+  app.use(webpackHotMiddleware(clientCompiler))
+
+  const serverCompiler = webpack(serverConfig)
+  const mfs = new MFS()
+  serverCompiler.outputFileSystem = mfs
+  serverCompiler.watch({}, (err, stats) => {
+    if (err) throw err
+    stats = stats.toJson()
+    if (stats.errors.length) return
+
+    //  vue-ssr-webpack-plugin 生成的bundle
+    bundle = JSON.parse(readFile(mfs, 'vue-ssr-server-bundle.json'))
+    update()
+  })
+}
+```
+
+我们用到了`memory-fs`将生成的 JSON 文件写入内存中，而不是磁盘中，是为了更快的读写。客户端不需要是因为`webpack-dev-middleware`已经帮我们完成了。这就是为什么我们在开发环境并没有 dist 文件夹生成。我们现在可以通过 npm run dev 访问 localhost:3000，更改代码，可以实现热加载。
+
+### 数据预取
+
+> 在服务器端渲染(SSR)期间，我们本质上是在渲染我们应用程序的"快照"，所以如果应用程序依赖于一些异步数据，**那么在开始渲染过程之前，需要先预取和解析好这些数据。**
+
+正如官方文档解释的，SSR 本质上就是先执行应用程序并返回 HTML，所以我们需要服务端处理数据，客户端与之同步。数据预取官方文档实例代码很详细，我们照着实现一下即可。
+
+**store/index.js**
+
+```
+// ...
+
+export function createStore() {
+  return new Vuex.Store({
+    state: {
+      movie: {}
+    },
+    actions: {
+      // 通过传入id请求电影数据，这里我们模拟一下，先返回id
+      fetchMovie({ commit }, id) {
+        return new Promise((resolve, reject) => {
+          setTimeout(() => {
+            resolve({ id })
+          }, 500)
+        }).then(res => {
+          commit('setMoive', { res })
+        })
+      }
+    },
+    mutations: {
+      // 设置state
+      setMoive(state, { res }) {
+        state.movie = res
+      }
+    }
+  })
+}
+```
+
+**修改 A.vue**
+
+```
+<template>
+  <div>
+    A页 请求电影数据结果：{{  this.$store.state.movie }}
+  </div>
+</template>
+
+<script>
+export default {
+  name: 'A',
+  // 定义asyncData, entry-server.js会编译所有匹配的组件中是否包含，包含则执行
+  // 将state值挂在到context上，会被序列化为window.__INITIAL_STATE__
+  //
+  asyncData ({ store, route }) {
+    // 请求电影数据， 传入 ID ： 12345
+    return store.dispatch('fetchMovie', 12345)
+  },
+}
+</script>
+
+<style lang="stylus" scoped>
+h1
+  color blue
+</style>
+
+
+```
+
+服务端预取的原理就是，通过在组件内定义 `asyncData` 函数用于异步请求，在 `entry-server.js` 服务端中遍历所有匹配到的组件，如果包含 asyncData 则执行，并将 `state` 挂载到 `context` 上下文，`vue-server-renderer` 会将 state 序列化为 `window.** INITIAL_STATE **`，这样，entry-client.js 客户端就可以替换 state，实现同步。
+
+#### 客户端数据预取
+
+因为入口只会在第一次进入应用时执行一次，页面的跳转不会再执行服务端数据预取的逻辑，所以说我们需要客户端数据预取，官网文档实现有俩种方式，这里就只尝试一种，利用 router 的导航守卫，原理就是在每次进行跳转时，执行没有执行过的 asyncData 函数，
+
+```
+// 官方代码
+router.onReady(() => {
+  router.beforeResolve((to, from, next) => {
+    const matched = router.getMatchedComponents(to)
+    const prevMatched = router.getMatchedComponents(from)
+
+    // 我们只关心非预渲染的组件
+    // 所以我们对比它们，找出两个匹配列表的差异组件
+    let diffed = false
+    const activated = matched.filter((c, i) => {
+      return diffed || (diffed = (prevMatched[i] !== c))
+    })
+
+    if (!activated.length) {
+      return next()
+    }
+
+    // 这里如果有加载指示器(loading indicator)，就触发
+
+    Promise.all(activated.map(c => {
+      if (c.asyncData) {
+        return c.asyncData({ store, route: to })
+      }
+    })).then(() => {
+
+      // 停止加载指示器(loading indicator)
+
+      next()
+    }).catch(next)
+  })
+  app.$mount('#app')
+})
+```
+
+### 设置 Head 和缓存
+
+**title 注入**
+
+我们做服务端渲染，根据不同的页面会有不同的 meta、title。所以我们还需要注入不同的 Head。可以用到强大的 vue-meta 配合 SSR 使用。这里我们就按照官方文档来实现一个简单的 title 注入，首先你需要在你的 template 模板中定义
+
+**页面级别缓存**
+
+```
+// server.js
+
+// 设置缓存参数
+const microCache = LRU({
+  max: 100, // 最大缓存数
+  maxAge: 10000 //  10s过期，意味着10s内请求统一路径，缓存中都有
+})
+
+// 判断是否可以缓存，这里先模拟，当访问B就缓存
+const isCacheable = ctx => {
+  return ctx.url === '/b'
+}
+
+const render = async (ctx) => {
+  // ...忽略无关代码
+
+  // 判断是否可缓存，如果可缓存则先从缓存中查找
+  const cacheable = isCacheable(ctx)
+  if (cacheable) {
+    const hit = microCache.get(ctx.url)
+    if (hit) {
+      console.log('取到缓存') // 便于调试
+      ctx.body = hit
+      return
+    }
+  }
+
+  // 存入缓存, 只有当缓存中没有 && 可以缓存
+  if (cacheable) {
+    console.log('设置缓存') // 便于调试
+    microCache.set(ctx.url, html)
+  }
+}
+```
+
 ## 1 基本用法
 
 demo1.js： 渲染一个 Vue 实例

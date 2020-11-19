@@ -1,0 +1,30 @@
+{
+  "publicPath": "/",
+  "all": [
+    "static/js/main.b1c14403a7e226d29f4b.js"
+  ],
+  "initial": [
+    "static/js/main.b1c14403a7e226d29f4b.js"
+  ],
+  "async": [],
+  "modules": {
+    "613fc28d": [
+      0
+    ],
+    "60ab2e78": [
+      0
+    ],
+    "266924e4": [
+      0
+    ],
+    "6f321d46": [
+      0
+    ],
+    "7c92d95e": [
+      0
+    ],
+    "5fdbd910": [
+      0
+    ]
+  }
+}
