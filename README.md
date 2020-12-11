@@ -25,30 +25,13 @@ node server.js
 
 要手动删除 dist/index.html，不然会变成客户端渲染
 
-## Project setup
+- 2020.12.11
+
+增加了命令，不需要再手动删除 dist/index.html，目前进度是学完第一篇，还有第二篇，搭配 dev 开发环境。
 
 ```
-yarn install
+"build:client": "vue-cli-service build", // 打包客户端manifest
+"build:server": "cross-env WEBPACK_TARGET=node vue-cli-service build --mode server", // 打包服务端的bundle
+"build:win": "npm run build:server  && npm run build:client -- --no-clean", // 同时打包
+"start": " npm run build:win && rimraf dist/index.html && node server.js" // 生产环境启动node服务器，先打包，然后清理dist/index.html，再启动node服务器
 ```
-
-### Compiles and hot-reloads for development
-
-```
-yarn serve
-```
-
-### Compiles and minifies for production
-
-```
-yarn build
-```
-
-### Lints and fixes files
-
-```
-yarn lint
-```
-
-### Customize configuration
-
-See [Configuration Reference](https://cli.vuejs.org/config/).
